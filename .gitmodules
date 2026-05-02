@@ -6,7 +6,7 @@
 	url = https://github.com/EvolutionAPI/evo-ai-crm-community.git
 [submodule "evo-ai-frontend-community"]
 	path = evo-ai-frontend-community
-	url = https://github.com/EvolutionAPI/evo-ai-frontend-community.git
+	url = https://github.com/maximusresultados/evo-ai-frontend-community.git
 [submodule "evo-ai-processor-community"]
 	path = evo-ai-processor-community
 	url = https://github.com/EvolutionAPI/evo-ai-processor-community.git
