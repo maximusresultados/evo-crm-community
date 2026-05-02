@@ -1,0 +1,381 @@
+# =============================================================================
+# ChatMax — Dokploy / Docker Compose (build do fonte)
+# =============================================================================
+# Gerado via: ./new-client.sh --client=NOME --backend-domain=... --frontend-domain=...
+#
+# Variáveis obrigatórias (definidas no Dokploy ou em .env local):
+#   BACKEND_URL, FRONTEND_URL, CORS_ORIGINS
+#   POSTGRES_DATABASE, POSTGRES_USERNAME, POSTGRES_PASSWORD
+#   REDIS_PASSWORD
+#   SECRET_KEY_BASE, JWT_SECRET_KEY, DOORKEEPER_JWT_SECRET_KEY
+#   EVOAI_CRM_API_TOKEN, ENCRYPTION_KEY, BOT_RUNTIME_SECRET
+#   VITE_BRAND_LOGO_URL
+#
+# Domínios no Dokploy:
+#   evo_gateway  → porta 3030  → BACKEND_URL
+#   evo_frontend → porta 80    → FRONTEND_URL
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # Infrastructure
+  # ---------------------------------------------------------------------------
+  evo_postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    volumes:
+      - evo_postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DATABASE}
+      POSTGRES_USER: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USERNAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  evo_redis:
+    image: redis:alpine
+    restart: unless-stopped
+    command: ["sh", "-c", "redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes"]
+    volumes:
+      - evo_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # API Gateway (Nginx) — porta 3030 → apontar BACKEND_URL aqui no Dokploy
+  # ---------------------------------------------------------------------------
+  evo_gateway:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "3030"
+    depends_on:
+      evo_auth:
+        condition: service_healthy
+      evo_crm:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Auth Service (Ruby / Rails)
+  # ---------------------------------------------------------------------------
+  evo_auth:
+    build:
+      context: ./evo-auth-service-community
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: bash -c "bundle exec rails db:prepare && bundle exec rails s -p 3001 -b 0.0.0.0"
+    expose:
+      - "3001"
+    environment:
+      RAILS_ENV: production
+      RAILS_MAX_THREADS: ${RAILS_MAX_THREADS:-5}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      EVOAI_CRM_API_TOKEN: ${EVOAI_CRM_API_TOKEN}
+      POSTGRES_HOST: evo_postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USERNAME: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DATABASE: ${POSTGRES_DATABASE}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@evo_redis:6379/1
+      FRONTEND_URL: ${FRONTEND_URL}
+      BACKEND_URL: ${BACKEND_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      MAILER_SENDER_EMAIL: ${MAILER_SENDER_EMAIL:-suporte@chatmax.app.br}
+      DOORKEEPER_JWT_SECRET_KEY: ${DOORKEEPER_JWT_SECRET_KEY}
+      DOORKEEPER_JWT_ALGORITHM: hs256
+      DOORKEEPER_JWT_ISS: evo-auth-service
+      MFA_ISSUER: ${MFA_ISSUER:-chatmax}
+      SIDEKIQ_CONCURRENCY: ${SIDEKIQ_CONCURRENCY:-10}
+      ACTIVE_STORAGE_SERVICE: ${ACTIVE_STORAGE_SERVICE:-local}
+    depends_on:
+      evo_postgres:
+        condition: service_healthy
+      evo_redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+
+  evo_auth_sidekiq:
+    build:
+      context: ./evo-auth-service-community
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["bundle", "exec", "sidekiq"]
+    environment:
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      EVOAI_CRM_API_TOKEN: ${EVOAI_CRM_API_TOKEN}
+      POSTGRES_HOST: evo_postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USERNAME: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DATABASE: ${POSTGRES_DATABASE}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@evo_redis:6379/1
+      SIDEKIQ_CONCURRENCY: ${SIDEKIQ_CONCURRENCY:-10}
+      ACTIVE_STORAGE_SERVICE: ${ACTIVE_STORAGE_SERVICE:-local}
+    depends_on:
+      evo_postgres:
+        condition: service_healthy
+      evo_redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # CRM Service (Ruby / Rails)
+  # ---------------------------------------------------------------------------
+  evo_crm:
+    build:
+      context: ./evo-ai-crm-community
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    command: >
+      sh -c "
+        until wget -qO- http://evo_auth:3001/health >/dev/null 2>&1; do
+          echo 'Aguardando auth...'; sleep 5;
+        done;
+        bundle exec rails db:prepare &&
+        bundle exec rails s -p 3000 -b 0.0.0.0
+      "
+    expose:
+      - "3000"
+    environment:
+      RAILS_ENV: production
+      RAILS_MAX_THREADS: ${RAILS_MAX_THREADS:-5}
+      RAILS_SERVE_STATIC_FILES: "true"
+      RAILS_LOG_TO_STDOUT: "true"
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      EVOAI_CRM_API_TOKEN: ${EVOAI_CRM_API_TOKEN}
+      POSTGRES_HOST: evo_postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USERNAME: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DATABASE: ${POSTGRES_DATABASE}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@evo_redis:6379/0
+      EVO_AUTH_SERVICE_URL: http://evo_auth:3001
+      EVO_AI_CORE_SERVICE_URL: http://evo_core:5555
+      BACKEND_URL: ${BACKEND_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+      DISABLE_TELEMETRY: "true"
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      ENABLE_ACCOUNT_SIGNUP: "true"
+      ENABLE_PUSH_RELAY_SERVER: "true"
+      ENABLE_INBOX_EVENTS: "true"
+      BOT_RUNTIME_URL: http://evo_bot_runtime:8080
+      BOT_RUNTIME_SECRET: ${BOT_RUNTIME_SECRET}
+      BOT_RUNTIME_POSTBACK_BASE_URL: http://evo_crm:3000
+    depends_on:
+      evo_postgres:
+        condition: service_healthy
+      evo_redis:
+        condition: service_healthy
+      evo_auth:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  evo_crm_sidekiq:
+    build:
+      context: ./evo-ai-crm-community
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    command: ["bundle", "exec", "sidekiq", "-C", "config/sidekiq.yml"]
+    environment:
+      RAILS_ENV: production
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      EVOAI_CRM_API_TOKEN: ${EVOAI_CRM_API_TOKEN}
+      POSTGRES_HOST: evo_postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USERNAME: ${POSTGRES_USERNAME}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DATABASE: ${POSTGRES_DATABASE}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@evo_redis:6379/0
+      EVO_AUTH_SERVICE_URL: http://evo_auth:3001
+      EVO_AI_CORE_SERVICE_URL: http://evo_core:5555
+      BOT_RUNTIME_URL: http://evo_bot_runtime:8080
+      BOT_RUNTIME_SECRET: ${BOT_RUNTIME_SECRET}
+      BOT_RUNTIME_POSTBACK_BASE_URL: http://evo_crm:3000
+    depends_on:
+      evo_postgres:
+        condition: service_healthy
+      evo_redis:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Core Service (Go / Gin)
+  # ---------------------------------------------------------------------------
+  evo_core:
+    build:
+      context: ./evo-ai-core-service-community
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "5555"
+    environment:
+      DB_HOST: evo_postgres
+      DB_PORT: "5432"
+      DB_USER: ${POSTGRES_USERNAME}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DATABASE}
+      DB_SSLMODE: disable
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-10}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-100}
+      DB_CONN_MAX_LIFETIME: ${DB_CONN_MAX_LIFETIME:-1h}
+      DB_CONN_MAX_IDLE_TIME: ${DB_CONN_MAX_IDLE_TIME:-30m}
+      PORT: "5555"
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      JWT_ALGORITHM: HS256
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      EVOLUTION_BASE_URL: http://evo_crm:3000
+      EVO_AUTH_BASE_URL: http://evo_auth:3001
+      AI_PROCESSOR_URL: http://evo_processor:8000
+      AI_PROCESSOR_VERSION: ${AI_PROCESSOR_VERSION:-v1}
+    depends_on:
+      evo_postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5555/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Processor Service (Python / FastAPI)
+  # ---------------------------------------------------------------------------
+  evo_processor:
+    build:
+      context: ./evo-ai-processor-community
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: >
+      sh -c "
+        alembic upgrade head 2>&1 || echo 'Migration errors, continuando...';
+        python -m scripts.run_seeders;
+        uvicorn src.main:app --host 0.0.0.0 --port 8000
+      "
+    expose:
+      - "8000"
+    environment:
+      POSTGRES_CONNECTION_STRING: postgresql://${POSTGRES_USERNAME}:${POSTGRES_PASSWORD}@evo_postgres:5432/${POSTGRES_DATABASE}
+      REDIS_HOST: evo_redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_SSL: "false"
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-a2a:}
+      REDIS_TTL: ${REDIS_TTL:-3600}
+      HOST: 0.0.0.0
+      PORT: "8000"
+      DEBUG: "false"
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      EVOAI_CRM_API_TOKEN: ${EVOAI_CRM_API_TOKEN}
+      EVO_AI_CRM_URL: http://evo_crm:3000
+      CORE_SERVICE_URL: http://evo_core:5555/api/v1
+      APP_URL: ${FRONTEND_URL}
+      API_URL: ${BACKEND_URL}
+      API_TITLE: ${API_TITLE:-ChatMax}
+      API_DESCRIPTION: ${API_DESCRIPTION:-ChatMax Agent Processor}
+      API_VERSION: ${API_VERSION:-1.0.0}
+      ORGANIZATION_NAME: ${ORGANIZATION_NAME:-Maximus Resultados Comerciais}
+      ORGANIZATION_URL: ${ORGANIZATION_URL:-https://www.chatmax.app.br}
+      TOOLS_CACHE_ENABLED: "true"
+      TOOLS_CACHE_TTL: ${TOOLS_CACHE_TTL:-3600}
+    volumes:
+      - evo_processor_logs:/app/logs
+    depends_on:
+      evo_postgres:
+        condition: service_healthy
+      evo_redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Bot Runtime (Go / Gin)
+  # ---------------------------------------------------------------------------
+  evo_bot_runtime:
+    build:
+      context: ./evo-bot-runtime
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      LISTEN_ADDR: ${LISTEN_ADDR:-0.0.0.0:8080}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@evo_redis:6379
+      AI_PROCESSOR_URL: http://evo_processor:8000
+      BOT_RUNTIME_SECRET: ${BOT_RUNTIME_SECRET}
+      AI_CALL_TIMEOUT_SECONDS: ${AI_CALL_TIMEOUT_SECONDS:-30}
+    depends_on:
+      evo_redis:
+        condition: service_healthy
+      evo_processor:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # ---------------------------------------------------------------------------
+  # Frontend (React / Vite / Nginx) — porta 80 → apontar FRONTEND_URL aqui
+  # ---------------------------------------------------------------------------
+  evo_frontend:
+    build:
+      context: ./evo-ai-frontend-community
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "80"
+    environment:
+      VITE_APP_ENV: production
+      VITE_API_URL: ${BACKEND_URL}
+      VITE_AUTH_API_URL: ${BACKEND_URL}
+      VITE_EVOAI_API_URL: ${BACKEND_URL}
+      VITE_AGENT_PROCESSOR_URL: ${BACKEND_URL}
+      VITE_BRAND_LOGO_URL: ${VITE_BRAND_LOGO_URL}
+    depends_on:
+      evo_auth:
+        condition: service_healthy
+      evo_crm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  evo_postgres_data:
+  evo_redis_data:
+  evo_processor_logs:
