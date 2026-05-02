@@ -148,7 +148,9 @@ services:
         until wget -qO- http://evo_auth:3001/health >/dev/null 2>&1; do
           echo 'Aguardando auth...'; sleep 5;
         done;
-        bundle exec rails db:prepare &&
+        bundle exec rails db:prepare || true;
+        PGPASSWORD=\"${POSTGRES_PASSWORD}\" psql -h \"${POSTGRES_HOST}\" -p \"${POSTGRES_PORT:-5432}\" -U \"${POSTGRES_USERNAME}\" -d \"${POSTGRES_DATABASE}\" -c \"INSERT INTO schema_migrations (version) VALUES ('20251114150000') ON CONFLICT DO NOTHING\" 2>/dev/null || true;
+        bundle exec rails db:migrate &&
         bundle exec rails s -p 3000 -b 0.0.0.0
       "
     expose:
