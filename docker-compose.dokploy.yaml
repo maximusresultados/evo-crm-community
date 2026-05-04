@@ -150,7 +150,7 @@ services:
       context: ./evo-ai-crm-community
       dockerfile: docker/Dockerfile
     restart: unless-stopped
-    command: bash -c "bundle exec rails db:prepare && bundle exec rails s -p 3000 -b 0.0.0.0"
+    command: sh -c "bundle exec rails db:prepare && bundle exec rails s -p 3000 -b 0.0.0.0"
     expose:
       - "3000"
     environment:
