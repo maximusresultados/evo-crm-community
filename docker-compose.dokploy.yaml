@@ -73,7 +73,7 @@ services:
       context: ./evo-auth-service-community
       dockerfile: Dockerfile
     restart: unless-stopped
-    command: bash -c "bundle exec rails db:prepare && bundle exec rails s -p 3001 -b 0.0.0.0"
+    command: bash -c "bundle exec rails s -p 3001 -b 0.0.0.0"
     expose:
       - "3001"
     environment:
@@ -102,6 +102,8 @@ services:
       evo_postgres:
         condition: service_healthy
       evo_redis:
+        condition: service_healthy
+      evo_crm:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
@@ -137,6 +139,8 @@ services:
         condition: service_healthy
       evo_redis:
         condition: service_healthy
+      evo_auth:
+        condition: service_healthy
 
   # ---------------------------------------------------------------------------
   # CRM Service (Ruby / Rails)
@@ -146,14 +150,7 @@ services:
       context: ./evo-ai-crm-community
       dockerfile: docker/Dockerfile
     restart: unless-stopped
-    command: >
-      sh -c "
-        until wget -qO- http://evo_auth:3001/health >/dev/null 2>&1; do
-          echo 'Aguardando auth...'; sleep 5;
-        done;
-        bundle exec rails db:prepare &&
-        bundle exec rails s -p 3000 -b 0.0.0.0
-      "
+    command: bash -c "bundle exec rails db:prepare && bundle exec rails s -p 3000 -b 0.0.0.0"
     expose:
       - "3000"
     environment:
@@ -188,8 +185,6 @@ services:
         condition: service_healthy
       evo_redis:
         condition: service_healthy
-      evo_auth:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health/live"]
       interval: 30s
@@ -223,6 +218,8 @@ services:
       evo_postgres:
         condition: service_healthy
       evo_redis:
+        condition: service_healthy
+      evo_crm:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
